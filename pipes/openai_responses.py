@@ -53,11 +53,11 @@ class Pipe:
         )
         timeout: int = Field(default=600, title="请求超时时间（秒）")
         proxy: Optional[str] = Field(default="", title="代理地址")
-        models: str = Field(default="gpt-5", title="模型", description="使用英文逗号分隔多个模型")
+        models: str = Field(default="gpt-5.4", title="模型", description="使用英文逗号分隔多个模型")
 
     class UserValves(BaseModel):
         verbosity: Literal["low", "medium", "high"] = Field(default="medium", title="输出详细程度")
-        reasoning_effort: Literal["none", "low", "medium", "high", "xhigh"] = Field(default="low", title="思考推理强度")
+        reasoning_effort: Literal["none", "low", "medium", "high", "xhigh"] = Field(default="medium", title="思考推理强度")
         summary: Literal["auto", "concise", "detailed"] = Field(default="auto", title="思考输出摘要程度")
 
     def __init__(self):
@@ -153,6 +153,8 @@ class Pipe:
 
         # reasoning
         reasoning_effort = user_valves.reasoning_effort
+        if "chat" in model:
+            reasoning_effort = "medium"
 
         # build body
         data = {
