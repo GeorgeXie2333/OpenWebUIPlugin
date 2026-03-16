@@ -58,14 +58,14 @@ class Pipe:
         api_key: str = Field(default="", title="API Key")
         timeout: int = Field(default=600, title="请求超时时间 (秒)")
         proxy: Optional[str] = Field(default="", title="代理地址")
-        models: str = Field(default="gemini-3-pro-image-preview", title="模型", description="使用英文逗号分隔多个模型")
+        models: str = Field(default="gemini-3-pro-image-preview,gemini-3.1-flash-image-preview", title="模型", description="使用英文逗号分隔多个模型")
         response_modalities: Literal["TEXT", "IMAGE", "TEXT,IMAGE"] = Field(
             default="IMAGE", title="响应模态", description="使用英文逗号分隔"
         )
 
     class UserValves(BaseModel):
         image_size: Literal["512", "1K", "2K", "4K"] = Field(default="1K", title="图片大小 (像素)")
-        aspect_ratio: Literal["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"] = Field(
+        aspect_ratio: Literal["auto", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9", "4:1", "1:4", "8:1", "1:8"] = Field(
             default="1:1", title="图片比例"
         )
 
@@ -94,9 +94,14 @@ class Pipe:
             trust_env=True,
             timeout=self.valves.timeout,
         ) as client:
-            response = await client.post(**payload)
-            if response.status_code != 200:
-                raise APIException(status=response.status_code, content=response.text, response=response)
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                response = await client.post(**payload)
+                if response.status_code == 200:
+                    break
+                if attempt == max_attempts:
+                    raise APIException(status=response.status_code, content=response.text, response=response)
+                logger.warning("Request failed (status=%d), retrying (%d/%d)...", response.status_code, attempt, max_attempts)
             response = response.json()
             # upload image
             results = []
@@ -222,7 +227,7 @@ class Pipe:
                 "generationConfig": {
                     "responseModalities": self.valves.response_modalities.split(","),
                     "imageConfig": {
-                        "aspectRatio": user_valves.aspect_ratio,
+                        **({} if user_valves.aspect_ratio == "auto" else {"aspectRatio": user_valves.aspect_ratio}),
                         "imageSize": user_valves.image_size,
                     },
                 },
