@@ -55,11 +55,11 @@ class Pipe:
         num_of_images: int = Field(default=1, title="图片数量", ge=1, le=10)
         timeout: int = Field(default=600, title="请求超时（秒）")
         proxy: str = Field(default="", title="代理地址")
-        models: str = Field(default="gpt-image-1", title="支持模型列表", description="多个模型用逗号分隔")
+        models: str = Field(default="gpt-image-1.5", title="支持模型列表", description="多个模型用逗号分隔")
 
     class UserValves(BaseModel):
         quality: Literal["low", "medium", "high", "auto"] = Field(default="auto", title="图片质量")
-        size: Literal["1024x1024", "1536x1024", "1024x1536", "auto"] = Field(default="auto", title="图片比例")
+        size: Literal["auto", "1024x1024", "1536x1024", "1024x1536"] = Field(default="auto", title="图片比例")
 
     def __init__(self):
         self.valves = self.Valves()
