@@ -2,7 +2,7 @@
 title: Claude Messages
 author: OVINC CN
 git_url: https://github.com/OVINC-CN/OpenWebUIPlugin.git
-version: 0.1.8
+version: 0.1.9
 licence: MIT
 """
 
@@ -61,6 +61,7 @@ class Pipe:
     class UserValves(BaseModel):
         max_tokens: int = Field(default=64000, title="最大响应Token数")
         enable_thinking: bool = Field(default=True, title="启用思考")
+        thinking_display: Literal["summarized", "omitted"] = Field(default="summarized", title="思维块")
         effort: Literal["low", "medium", "high", "xhigh", "max"] = Field(
             default="low", title="努力程度", description="适用于 Sonnet 4.6 & Opus4.6 及更新模型"
         )
@@ -218,7 +219,10 @@ class Pipe:
 
         # thinking
         if user_valves.enable_thinking:
-            thinking = {"thinking": {"type": "adaptive"}, "output_config": {"effort": user_valves.effort}}
+            thinking = {
+                "thinking": {"type": "adaptive", "display": "summarized"},
+                "output_config": {"effort": user_valves.effort},
+            }
         else:
             thinking = {"thinking": {"type": "disabled"}}
 
