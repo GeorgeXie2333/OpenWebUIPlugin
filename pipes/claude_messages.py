@@ -63,7 +63,7 @@ class Pipe:
         enable_thinking: bool = Field(default=True, title="启用思考")
         thinking_display: Literal["summarized", "omitted"] = Field(default="summarized", title="思维块")
         effort: Literal["low", "medium", "high", "xhigh", "max"] = Field(
-            default="low", title="努力程度", description="适用于 Sonnet 4.6 & Opus4.6 及更新模型"
+            default="medium", title="努力程度", description="适用于 Sonnet 4.6 & Opus4.6 及更新模型"
         )
         enable_cache: bool = Field(default=True, title="启用缓存")
         cache_timeout: Literal["5m", "1h"] = Field(default="5m", title="缓存过期时间")

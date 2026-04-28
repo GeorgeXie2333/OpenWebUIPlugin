@@ -60,7 +60,7 @@ class Pipe:
 
     class UserValves(BaseModel):
         reasoning_effort: Literal["low", "medium", "high"] = Field(
-            default="low", title="推理强度", description="适用 Gemini 3 系列"
+            default="medium", title="推理强度", description="适用 Gemini 3 系列"
         )
 
     def __init__(self):
