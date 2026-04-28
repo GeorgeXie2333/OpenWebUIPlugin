@@ -57,7 +57,9 @@ class Pipe:
 
     class UserValves(BaseModel):
         verbosity: Literal["low", "medium", "high"] = Field(default="medium", title="输出详细程度")
-        reasoning_effort: Literal["none", "low", "medium", "high", "xhigh"] = Field(default="medium", title="思考推理强度")
+        reasoning_effort: Literal["none", "low", "medium", "high", "xhigh"] = Field(
+            default="medium", title="思考推理强度"
+        )
         summary: Literal["auto", "concise", "detailed"] = Field(default="auto", title="思考输出摘要程度")
 
     def __init__(self):
