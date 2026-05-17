@@ -6,17 +6,25 @@ version: 0.1.2
 licence: MIT
 """
 
+import base64
+import binascii
+import io
 import json
 import logging
+import mimetypes
+import re
 import time
 import uuid
-from typing import AsyncIterable, Literal, Optional, Tuple
+from typing import AsyncIterable, List, Literal, Optional, Tuple
 
 import httpx
-from fastapi import Request
+from fastapi import BackgroundTasks, Request, UploadFile
 from httpx import Response
 from open_webui.env import GLOBAL_LOG_LEVEL
+from open_webui.models.users import UserModel, Users
+from open_webui.routers.files import get_file_content_by_id, upload_file
 from pydantic import BaseModel, Field
+from starlette.datastructures import Headers
 from starlette.responses import StreamingResponse
 
 logger = logging.getLogger(__name__)
@@ -52,6 +60,8 @@ VERBOSITY_MAP = {
     "medium": "medium",
     "high": "high",
 }
+
+IMAGE_MARKDOWN_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]+)\)")
 
 
 class APIException(Exception):
@@ -103,7 +113,11 @@ class Pipe:
         return StreamingResponse(self.__stream_pipe(body=body, __user__=__user__, __request__=__request__))
 
     async def __stream_pipe(self, body: dict, __user__: dict, __request__: Request) -> AsyncIterable:
-        model, payload = await self._build_payload(body=body, user_valves=__user__["valves"])
+        user = Users.get_user_by_id(__user__["id"])
+        if not user:
+            raise ValueError("user not found")
+        model, payload = await self._build_payload(user=user, body=body, user_valves=__user__["valves"])
+        emitted_image_call_ids = set()
         # call client
         async with httpx.AsyncClient(
             base_url=self.valves.base_url,
@@ -138,7 +152,37 @@ class Pipe:
                             if is_thinking:
                                 is_thinking = False
                             yield self._format_stream_data(model=model, content=line["delta"])
+                        case "response.image_generation_call.partial_image":
+                            image_content = self._format_image_generation_result(
+                                __request__=__request__,
+                                user=user,
+                                image_data=line.get("partial_image_b64", ""),
+                                mime_type=self._get_image_tool_mime_type(payload["json"], line),
+                                image_prefix="openai-image-partial",
+                            )
+                            if image_content:
+                                yield self._format_stream_data(model=model, content=image_content)
+                        case "response.output_item.done":
+                            item = line.get("item") or {}
+                            if item.get("type") == "image_generation_call":
+                                image_content = self._format_image_generation_call(
+                                    __request__=__request__,
+                                    user=user,
+                                    item=item,
+                                    payload=payload["json"],
+                                    emitted_image_call_ids=emitted_image_call_ids,
+                                )
+                                if image_content:
+                                    yield self._format_stream_data(model=model, content=image_content)
                         case "response.completed":
+                            for image_content in self._format_completed_image_generation_calls(
+                                __request__=__request__,
+                                user=user,
+                                response=line.get("response") or {},
+                                payload=payload["json"],
+                                emitted_image_call_ids=emitted_image_call_ids,
+                            ):
+                                yield self._format_stream_data(model=model, content=image_content)
                             yield self._format_stream_data(
                                 model=model, usage=line["response"]["usage"], if_finished=True
                             )
@@ -158,26 +202,37 @@ class Pipe:
                                     }
                                     yield f"data: {json.dumps(data)}\n\n"
 
-    async def _build_payload(self, body: dict, user_valves: UserValves, stream: bool = True) -> Tuple[str, dict]:
+    async def _build_payload(
+        self,
+        user: UserModel,
+        body: dict,
+        user_valves: UserValves,
+        stream: bool = True,
+    ) -> Tuple[str, dict]:
         model = body["model"].split(".", 1)[1]
 
         # build messages
         messages = []
         for message in body["messages"]:
             if isinstance(message["content"], str):
-                messages.append({"content": message["content"], "role": message["role"]})
+                messages.append(
+                    {
+                        "content": await self._parse_message_text(user=user, text=message["content"]),
+                        "role": message["role"],
+                    }
+                )
             elif isinstance(message["content"], list):
                 content = []
                 for item in message["content"]:
                     if item["type"] == "text":
-                        content.append({"type": "input_text", "text": item["text"]})
-                    elif item["type"] == "image_url":
-                        content.append(
-                            {
-                                "type": "input_image",
-                                "image_url": item["image_url"]["url"],
-                            }
-                        )
+                        content.extend(await self._parse_message_text_as_content(user=user, text=item["text"]))
+                    elif item["type"] in {"input_text", "output_text"}:
+                        content.extend(await self._parse_message_text_as_content(user=user, text=item["text"]))
+                    elif item["type"] in {"image_url", "input_image"}:
+                        image_content = self._normalize_input_image_item(item)
+                        if not image_content:
+                            raise TypeError("Invalid image content")
+                        content.append(image_content)
                     else:
                         raise TypeError("Invalid message content type %s" % item["type"])
                 messages.append({"role": message["role"], "content": content})
@@ -220,6 +275,215 @@ class Pipe:
             payload["json"]["tools"] = body["tools"]
 
         return model, payload
+
+    async def _parse_message_text(self, user: UserModel, text: str):
+        content = await self._parse_message_text_as_content(user=user, text=text)
+        if len(content) == 1 and content[0].get("type") == "input_text" and content[0].get("text") == text:
+            return text
+        return content
+
+    async def _parse_message_text_as_content(self, user: UserModel, text: str) -> List[dict]:
+        content = []
+        cursor = 0
+        has_image = False
+
+        for match in IMAGE_MARKDOWN_PATTERN.finditer(text):
+            before = text[cursor : match.start()]
+            if before.strip():
+                content.append({"type": "input_text", "text": before})
+
+            image_content = await self._parse_markdown_image(
+                user=user,
+                alt_text=match.group("alt"),
+                image_url=match.group("url"),
+            )
+            if image_content:
+                has_image = True
+                content.append(image_content)
+            else:
+                content.append({"type": "input_text", "text": match.group(0)})
+
+            cursor = match.end()
+
+        remaining = text[cursor:]
+        if remaining.strip():
+            content.append({"type": "input_text", "text": remaining})
+
+        if not has_image:
+            return [{"type": "input_text", "text": text}]
+        return content or [{"type": "input_text", "text": text}]
+
+    async def _parse_markdown_image(self, user: UserModel, alt_text: str, image_url: str) -> Optional[dict]:
+        image_url = image_url.strip()
+        if image_url.startswith("<") and image_url.endswith(">"):
+            image_url = image_url[1:-1].strip()
+
+        if image_url.startswith(("http://", "https://", "data:")):
+            return {"type": "input_image", "image_url": image_url}
+
+        file_id = self._extract_file_id_from_markdown(alt_text=alt_text, image_url=image_url)
+        if not file_id:
+            return None
+
+        data_url = await self._get_image_data_url_from_file(user=user, file_id=file_id)
+        if not data_url:
+            return None
+        return {"type": "input_image", "image_url": data_url}
+
+    async def _get_image_data_url_from_file(self, user: UserModel, file_id: str) -> str:
+        try:
+            file_response = await get_file_content_by_id(id=file_id, user=user)
+            with open(file_response.path, "rb") as file_content:
+                image_bytes = file_content.read()
+        except Exception as err:
+            logger.warning("failed to load generated image %s: %s", file_id, err)
+            return ""
+
+        mime_type = mimetypes.guess_type(file_response.path)[0] or "image/png"
+        encoded = base64.b64encode(image_bytes).decode()
+        return f"data:{mime_type};base64,{encoded}"
+
+    @staticmethod
+    def _normalize_input_image_item(item: dict) -> dict:
+        image_content = {"type": "input_image"}
+        image_url = item.get("image_url", "")
+        if isinstance(image_url, dict):
+            image_url = image_url.get("url", "")
+        if isinstance(image_url, str) and image_url:
+            image_content["image_url"] = image_url
+        elif item.get("file_id"):
+            image_content["file_id"] = item["file_id"]
+        else:
+            return {}
+
+        if item.get("detail"):
+            image_content["detail"] = item["detail"]
+        return image_content
+
+    @staticmethod
+    def _extract_file_id_from_markdown(alt_text: str, image_url: str) -> str:
+        if alt_text.startswith("openai-image-partial-"):
+            return alt_text.removeprefix("openai-image-partial-")
+        if alt_text.startswith("openai-image-"):
+            return alt_text.removeprefix("openai-image-")
+
+        match = re.search(r"/files/([^/?#]+)/", image_url)
+        if match:
+            return match.group(1)
+        match = re.search(r"/files/([^/?#]+)", image_url)
+        if match:
+            return match.group(1)
+        return ""
+
+    def _format_completed_image_generation_calls(
+        self,
+        __request__: Request,
+        user: UserModel,
+        response: dict,
+        payload: dict,
+        emitted_image_call_ids: set,
+    ):
+        for item in response.get("output", []):
+            if item.get("type") != "image_generation_call":
+                continue
+            image_content = self._format_image_generation_call(
+                __request__=__request__,
+                user=user,
+                item=item,
+                payload=payload,
+                emitted_image_call_ids=emitted_image_call_ids,
+            )
+            if image_content:
+                yield image_content
+
+    def _format_image_generation_call(
+        self,
+        __request__: Request,
+        user: UserModel,
+        item: dict,
+        payload: dict,
+        emitted_image_call_ids: set,
+    ) -> str:
+        image_call_id = item.get("id")
+        if image_call_id and image_call_id in emitted_image_call_ids:
+            return ""
+
+        image_content = self._format_image_generation_result(
+            __request__=__request__,
+            user=user,
+            image_data=item.get("result", ""),
+            mime_type=self._get_image_tool_mime_type(payload, item),
+            image_prefix="openai-image",
+        )
+        if image_content and image_call_id:
+            emitted_image_call_ids.add(image_call_id)
+        return image_content
+
+    def _format_image_generation_result(
+        self,
+        __request__: Request,
+        user: UserModel,
+        image_data: str,
+        mime_type: str,
+        image_prefix: str,
+    ) -> str:
+        if not image_data:
+            return ""
+
+        file_item = upload_file(
+            request=__request__,
+            background_tasks=BackgroundTasks(),
+            file=UploadFile(
+                file=io.BytesIO(self._decode_base64_image(image_data)),
+                filename=f"generated-image-{uuid.uuid4().hex}{self._get_image_extension(mime_type)}",
+                headers=Headers({"content-type": mime_type}),
+            ),
+            process=False,
+            user=user,
+            metadata={"mime_type": mime_type},
+        )
+        image_url = __request__.app.url_path_for("get_file_content_by_id", id=file_item.id)
+        return f"![{image_prefix}-{file_item.id}]({image_url})"
+
+    @staticmethod
+    def _decode_base64_image(image_data: str) -> bytes:
+        data = image_data.strip()
+        if data.startswith("data:") and "," in data:
+            data = data.split(",", 1)[1]
+
+        data = "".join(data.split())
+        try:
+            decoded = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError):
+            padding = len(data) % 4
+            if padding:
+                data = f"{data}{'=' * (4 - padding)}"
+            decoded = base64.b64decode(data)
+
+        if not decoded:
+            raise ValueError("decoded image bytes is empty")
+        return decoded
+
+    @staticmethod
+    def _get_image_tool_mime_type(payload: dict, item: dict) -> str:
+        output_format = item.get("output_format")
+        if not output_format:
+            for tool in payload.get("tools", []):
+                if tool.get("type") == "image_generation":
+                    output_format = tool.get("output_format")
+                    break
+
+        return {
+            "jpeg": "image/jpeg",
+            "jpg": "image/jpeg",
+            "png": "image/png",
+            "webp": "image/webp",
+        }.get(output_format or "", "image/png")
+
+    @staticmethod
+    def _get_image_extension(mime_type: str) -> str:
+        file_ext = mimetypes.guess_extension(mime_type) or ".png"
+        return ".jpg" if file_ext == ".jpe" else file_ext
 
     # pylint: disable=R0913,R0917
     def _format_stream_data(
