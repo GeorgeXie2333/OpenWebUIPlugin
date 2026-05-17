@@ -94,7 +94,7 @@ class Pipe:
                     logger.error("response invalid with %d: %s", response.status_code, text)
                     raise APIException(response.status_code, text, response)
                 # parse resp
-                is_thinking = self.valves.enable_reasoning
+                is_thinking = False
                 async for line in response.aiter_lines():
                     # format stream data
                     line = line.strip()
@@ -106,36 +106,54 @@ class Pipe:
                         line = line[6:]
                     if isinstance(line, str):
                         line = json.loads(line)
-                    for item in line["candidates"]:
+                    for item in line.get("candidates", []):
                         content = item.get("content", {})
                         if not content:
-                            yield self._format_data(
-                                is_stream=True,
-                                model=model,
-                                content=item.get("finishReason", ""),
-                            )
+                            if item.get("finishReason"):
+                                closing_content = "" if is_thinking else None
+                                if is_thinking:
+                                    is_thinking = False
+                                yield self._format_data(
+                                    is_stream=True,
+                                    model=model,
+                                    content=closing_content,
+                                    finish_reason=self._format_finish_reason(item["finishReason"]),
+                                )
                             continue
                         parts = content.get("parts", [])
                         if not parts:
-                            yield self._format_data(
-                                is_stream=True,
-                                model=model,
-                                content=item.get("finishReason", ""),
-                            )
+                            if item.get("finishReason"):
+                                closing_content = "" if is_thinking else None
+                                if is_thinking:
+                                    is_thinking = False
+                                yield self._format_data(
+                                    is_stream=True,
+                                    model=model,
+                                    content=closing_content,
+                                    finish_reason=self._format_finish_reason(item["finishReason"]),
+                                )
                             continue
                         for part in parts:
                             # thinking content
                             if part.get("thought", False):
-                                if is_thinking:
-                                    yield self._format_data(is_stream=True, model=model, reasoning_content=part["text"])
+                                if self.valves.enable_reasoning and part.get("text"):
+                                    is_thinking = True
+                                    yield self._format_data(
+                                        is_stream=True,
+                                        model=model,
+                                        reasoning_content=part["text"],
+                                    )
                             # no thinking content
                             else:
                                 # stop thinking
-                                if is_thinking and part.get("text"):
+                                text = part.get("text")
+                                if is_thinking:
                                     is_thinking = False
+                                    if not text:
+                                        yield self._format_data(is_stream=True, model=model, content="")
                                 # text content
-                                if part.get("text"):
-                                    yield self._format_data(is_stream=True, model=model, content=part["text"])
+                                if text:
+                                    yield self._format_data(is_stream=True, model=model, content=text)
                                 # code content
                                 if part.get("executableCode"):
                                     data = {
@@ -164,6 +182,16 @@ class Pipe:
                                         }
                                     }
                                     yield f"data: {json.dumps(data)}\n\n"
+                        if item.get("finishReason"):
+                            closing_content = "" if is_thinking else None
+                            if is_thinking:
+                                is_thinking = False
+                            yield self._format_data(
+                                is_stream=True,
+                                model=model,
+                                content=closing_content,
+                                finish_reason=self._format_finish_reason(item["finishReason"]),
+                            )
                     # format usage data
                     usage_metadata = line.get("usageMetadata", None) or {}
                     usage = {
@@ -182,6 +210,8 @@ class Pipe:
                     if usage["prompt_tokens"] + usage["completion_tokens"] != usage["total_tokens"]:
                         usage["completion_tokens"] = usage["total_tokens"] - usage["prompt_tokens"]
                     yield self._format_data(is_stream=True, model=model, usage=usage)
+                if is_thinking:
+                    yield self._format_data(is_stream=True, model=model, content="", finish_reason="stop")
 
     async def _build_payload(self, body: dict, user_valves: UserValves) -> Tuple[str, dict]:
         # payload
@@ -257,9 +287,10 @@ class Pipe:
         self,
         is_stream: bool,
         model: Optional[str] = "",
-        content: Optional[str] = "",
-        reasoning_content: Optional[str] = "",
+        content: Optional[str] = None,
+        reasoning_content: Optional[str] = None,
         usage: Optional[dict] = None,
+        finish_reason: Optional[str] = None,
     ) -> str:
         data = {
             "id": f"chat.{uuid.uuid4().hex}",
@@ -268,17 +299,23 @@ class Pipe:
             "created": int(time.time()),
             "model": model,
         }
-        if content or reasoning_content:
+        output_data = {}
+        if reasoning_content is not None:
+            output_data["reasoning_content"] = reasoning_content
+        if content is not None:
+            output_data["content"] = content
+        if output_data or finish_reason:
             data["choices"] = [
                 {
-                    "finish_reason": "stop",
+                    "finish_reason": finish_reason or "",
                     "index": 0,
-                    "delta" if is_stream else "message": {
-                        "reasoning_content": reasoning_content,
-                        "content": content,
-                    },
+                    "delta" if is_stream else "message": output_data,
                 }
             ]
         if usage:
             data["usage"] = usage
         return f"data: {json.dumps(data)}\n\n"
+
+    @staticmethod
+    def _format_finish_reason(finish_reason: str) -> str:
+        return "stop" if finish_reason == "STOP" else finish_reason.lower()
