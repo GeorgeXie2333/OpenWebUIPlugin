@@ -208,30 +208,65 @@ class Pipe:
         # build messages
         messages = []
         for message in body["messages"]:
-            if isinstance(message["content"], str):
+            role = message["role"]
+            message_content = message["content"]
+            if role == "assistant":
+                assistant_content, reference_images = await self._parse_assistant_message(
+                    user=user,
+                    message_content=message_content,
+                )
+                if assistant_content:
+                    messages.append({"content": assistant_content, "role": role})
+                if reference_images:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "参考上一条助理回复中的生成图片。"},
+                                *reference_images,
+                            ],
+                        }
+                    )
+                continue
+
+            if isinstance(message_content, str):
                 messages.append(
                     {
-                        "content": await self._parse_message_text(user=user, text=message["content"]),
-                        "role": message["role"],
+                        "content": (
+                            await self._parse_message_text(user=user, text=message_content)
+                            if role == "user"
+                            else message_content
+                        ),
+                        "role": role,
                     }
                 )
-            elif isinstance(message["content"], list):
+            elif isinstance(message_content, list):
                 content = []
-                for item in message["content"]:
+                for item in message_content:
                     if item["type"] == "text":
-                        content.extend(await self._parse_message_text_as_content(user=user, text=item["text"]))
+                        content.extend(
+                            await self._parse_message_text_as_content(user=user, text=item["text"])
+                            if role == "user"
+                            else [{"type": "input_text", "text": item["text"]}]
+                        )
                     elif item["type"] in {"input_text", "output_text"}:
-                        content.extend(await self._parse_message_text_as_content(user=user, text=item["text"]))
+                        content.extend(
+                            await self._parse_message_text_as_content(user=user, text=item["text"])
+                            if role == "user"
+                            else [{"type": "input_text", "text": item["text"]}]
+                        )
                     elif item["type"] in {"image_url", "input_image"}:
+                        if role != "user":
+                            continue
                         image_content = self._normalize_input_image_item(item)
                         if not image_content:
                             raise TypeError("Invalid image content")
                         content.append(image_content)
                     else:
                         raise TypeError("Invalid message content type %s" % item["type"])
-                messages.append({"role": message["role"], "content": content})
+                messages.append({"role": role, "content": content})
             else:
-                raise TypeError("Invalid message content type %s" % type(message["content"]))
+                raise TypeError("Invalid message content type %s" % type(message_content))
 
         # reasoning
         reasoning_effort = REASONING_EFFORT_MAP[user_valves.reasoning_effort]
@@ -270,6 +305,36 @@ class Pipe:
 
         return model, payload
 
+    async def _parse_assistant_message(self, user: UserModel, message_content) -> Tuple[object, List[dict]]:
+        if isinstance(message_content, str):
+            return message_content, await self._extract_markdown_images(user=user, text=message_content)
+
+        if not isinstance(message_content, list):
+            raise TypeError("Invalid message content type %s" % type(message_content))
+
+        assistant_content = []
+        reference_images = []
+        for item in message_content:
+            item_type = item.get("type")
+            if item_type == "refusal":
+                assistant_content.append({"type": "refusal", "refusal": item.get("refusal", "")})
+                continue
+            if item_type in {"text", "input_text", "output_text"}:
+                text = item.get("text", "")
+                assistant_content.append({"type": "output_text", "text": text})
+                reference_images.extend(await self._extract_markdown_images(user=user, text=text))
+                continue
+            if item_type in {"image_url", "input_image"}:
+                image_content = self._normalize_input_image_item(item)
+                if image_content:
+                    reference_images.append(image_content)
+                continue
+            raise TypeError("Invalid message content type %s" % item_type)
+
+        if len(assistant_content) == 1 and assistant_content[0].get("type") == "output_text":
+            return assistant_content[0].get("text", ""), reference_images
+        return assistant_content, reference_images
+
     async def _parse_message_text(self, user: UserModel, text: str):
         content = await self._parse_message_text_as_content(user=user, text=text)
         if len(content) == 1 and content[0].get("type") == "input_text" and content[0].get("text") == text:
@@ -306,6 +371,24 @@ class Pipe:
         if not has_image:
             return [{"type": "input_text", "text": text}]
         return content or [{"type": "input_text", "text": text}]
+
+    async def _extract_markdown_images(self, user: UserModel, text: str) -> List[dict]:
+        images = []
+        seen = set()
+        for match in IMAGE_MARKDOWN_PATTERN.finditer(text):
+            image_content = await self._parse_markdown_image(
+                user=user,
+                alt_text=match.group("alt"),
+                image_url=match.group("url"),
+            )
+            if not image_content:
+                continue
+            image_key = image_content.get("file_id") or image_content.get("image_url")
+            if image_key in seen:
+                continue
+            seen.add(image_key)
+            images.append(image_content)
+        return images
 
     async def _parse_markdown_image(self, user: UserModel, alt_text: str, image_url: str) -> Optional[dict]:
         image_url = image_url.strip()
