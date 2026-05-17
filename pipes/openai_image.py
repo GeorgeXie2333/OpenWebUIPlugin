@@ -27,6 +27,36 @@ from starlette.responses import StreamingResponse
 logger = logging.getLogger(__name__)
 logger.setLevel(GLOBAL_LOG_LEVEL)
 
+QUALITY_MAP = {
+    "低": "low",
+    "中": "medium",
+    "高": "high",
+    "自动": "auto",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "auto": "auto",
+}
+
+SIZE_MAP = {
+    "1K 1:1": "1024x1024",
+    "1.5K 3:2": "1536x1024",
+    "1.5K 2:3": "1024x1536",
+    "2K 1:1": "2048x2048",
+    "2K 16:9": "2048x1152",
+    "4K 16:9": "3840x2160",
+    "4K 9:16": "2160x3840",
+    "自动": "auto",
+    "1024x1024": "1024x1024",
+    "1536x1024": "1536x1024",
+    "1024x1536": "1024x1536",
+    "2048x2048": "2048x2048",
+    "2048x1152": "2048x1152",
+    "3840x2160": "3840x2160",
+    "2160x3840": "2160x3840",
+    "auto": "auto",
+}
+
 
 class APIException(Exception):
     def __init__(self, status: int, content: str, response: Response):
@@ -58,10 +88,17 @@ class Pipe:
         models: str = Field(default="gpt-image-2", title="支持模型列表", description="多个模型用逗号分隔")
 
     class UserValves(BaseModel):
-        quality: Literal["low", "medium", "high", "auto"] = Field(default="auto", title="图片质量")
+        quality: Literal["低", "中", "高", "自动"] = Field(default="自动", title="图片质量")
         size: Literal[
-            "1024x1024", "1536x1024", "1024x1536", "2048x2048", "2048x1152", "3840x2160", "2160x3840", "auto"
-        ] = Field(default="auto", title="图片比例")
+            "1K 1:1",
+            "1.5K 3:2",
+            "1.5K 2:3",
+            "2K 1:1",
+            "2K 16:9",
+            "4K 16:9",
+            "4K 9:16",
+            "自动",
+        ] = Field(default="自动", title="图片比例")
 
     def __init__(self):
         self.valves = self.Valves()
@@ -145,8 +182,8 @@ class Pipe:
             "prompt": "",
             "n": self.valves.num_of_images,
             "model": model,
-            "quality": user_valves.quality,
-            "size": user_valves.size,
+            "quality": QUALITY_MAP[user_valves.quality],
+            "size": SIZE_MAP[user_valves.size],
         }
 
         # read messages

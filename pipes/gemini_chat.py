@@ -22,6 +22,15 @@ from starlette.responses import StreamingResponse
 logger = logging.getLogger(__name__)
 logger.setLevel("INFO")
 
+REASONING_EFFORT_MAP = {
+    "低": "low",
+    "中": "medium",
+    "高": "high",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+}
+
 
 class APIException(Exception):
     def __init__(self, status: int, content: str, response: Response):
@@ -59,8 +68,8 @@ class Pipe:
         models: str = Field(default="gemini-2.5-pro", title="模型", description="使用英文逗号分隔多个模型")
 
     class UserValves(BaseModel):
-        reasoning_effort: Literal["low", "medium", "high"] = Field(
-            default="medium", title="推理强度", description="适用 Gemini 3 系列"
+        reasoning_effort: Literal["低", "中", "高"] = Field(
+            default="中", title="推理强度", description="适用 Gemini 3 系列"
         )
 
     def __init__(self):
@@ -255,7 +264,10 @@ class Pipe:
             contents.append(content)
 
         # get thinking budget
-        think_config = {"includeThoughts": True, "thinkingLevel": user_valves.reasoning_effort}
+        think_config = {
+            "includeThoughts": True,
+            "thinkingLevel": REASONING_EFFORT_MAP[user_valves.reasoning_effort],
+        }
 
         # other parameters
         extra_data = {}

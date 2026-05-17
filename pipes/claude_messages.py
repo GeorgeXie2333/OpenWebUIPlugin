@@ -21,6 +21,26 @@ from starlette.responses import StreamingResponse
 logger = logging.getLogger(__name__)
 logger.setLevel("INFO")
 
+EFFORT_MAP = {
+    "低": "low",
+    "中": "medium",
+    "高": "high",
+    "超高": "xhigh",
+    "最高": "max",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max",
+}
+
+THINKING_DISPLAY_MAP = {
+    "摘要": "summarized",
+    "省略": "omitted",
+    "summarized": "summarized",
+    "omitted": "omitted",
+}
+
 
 class APIException(Exception):
     def __init__(self, status: int, content: str, response: Response):
@@ -61,9 +81,9 @@ class Pipe:
     class UserValves(BaseModel):
         max_tokens: int = Field(default=64000, title="最大响应Token数")
         enable_thinking: bool = Field(default=True, title="启用思考")
-        thinking_display: Literal["summarized", "omitted"] = Field(default="summarized", title="思维块")
-        effort: Literal["low", "medium", "high", "xhigh", "max"] = Field(
-            default="medium", title="努力程度", description="适用于 Sonnet 4.6 & Opus4.6 及更新模型"
+        thinking_display: Literal["摘要", "省略"] = Field(default="摘要", title="思维块")
+        effort: Literal["低", "中", "高", "超高", "最高"] = Field(
+            default="中", title="推理强度", description="适用于 Sonnet 4.6 & Opus4.6 及更新模型"
         )
         enable_cache: bool = Field(default=True, title="启用缓存")
         cache_timeout: Literal["5m", "1h"] = Field(default="5m", title="缓存过期时间")
@@ -220,8 +240,11 @@ class Pipe:
         # thinking
         if user_valves.enable_thinking:
             thinking = {
-                "thinking": {"type": "adaptive", "display": "summarized"},
-                "output_config": {"effort": user_valves.effort},
+                "thinking": {
+                    "type": "adaptive",
+                    "display": THINKING_DISPLAY_MAP[user_valves.thinking_display],
+                },
+                "output_config": {"effort": EFFORT_MAP[user_valves.effort]},
             }
         else:
             thinking = {"thinking": {"type": "disabled"}}

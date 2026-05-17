@@ -22,6 +22,37 @@ from starlette.responses import StreamingResponse
 logger = logging.getLogger(__name__)
 logger.setLevel(GLOBAL_LOG_LEVEL)
 
+REASONING_EFFORT_MAP = {
+    "关闭": "none",
+    "低": "low",
+    "中": "medium",
+    "高": "high",
+    "超高": "xhigh",
+    "none": "none",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+}
+
+SUMMARY_MAP = {
+    "自动": "auto",
+    "简要": "concise",
+    "详尽": "detailed",
+    "auto": "auto",
+    "concise": "concise",
+    "detailed": "detailed",
+}
+
+VERBOSITY_MAP = {
+    "较短": "low",
+    "适中": "medium",
+    "较长": "high",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+}
+
 
 class APIException(Exception):
     def __init__(self, status: int, content: str, response: Response):
@@ -56,11 +87,11 @@ class Pipe:
         models: str = Field(default="gpt-5", title="模型", description="使用英文逗号分隔多个模型")
 
     class UserValves(BaseModel):
-        verbosity: Literal["low", "medium", "high"] = Field(default="medium", title="输出详细程度")
-        reasoning_effort: Literal["none", "low", "medium", "high", "xhigh"] = Field(
-            default="medium", title="思考推理强度"
+        verbosity: Literal["较短", "适中", "较长"] = Field(default="适中", title="输出详细程度")
+        reasoning_effort: Literal["关闭", "低", "中", "高", "超高"] = Field(
+            default="中", title="推理强度"
         )
-        summary: Literal["auto", "concise", "detailed"] = Field(default="auto", title="思考输出摘要程度")
+        summary: Literal["自动", "简要", "详尽"] = Field(default="自动", title="思考输出摘要程度")
 
     def __init__(self):
         self.valves = self.Valves()
@@ -154,7 +185,7 @@ class Pipe:
                 raise TypeError("Invalid message content type %s" % type(message["content"]))
 
         # reasoning
-        reasoning_effort = user_valves.reasoning_effort
+        reasoning_effort = REASONING_EFFORT_MAP[user_valves.reasoning_effort]
 
         # build body
         data = {
@@ -162,10 +193,10 @@ class Pipe:
             "input": messages,
             "reasoning": {
                 "effort": reasoning_effort,
-                "summary": user_valves.summary,
+                "summary": SUMMARY_MAP[user_valves.summary],
             },
             "text": {
-                "verbosity": user_valves.verbosity,
+                "verbosity": VERBOSITY_MAP[user_valves.verbosity],
             },
             "stream": stream,
             "store": False,

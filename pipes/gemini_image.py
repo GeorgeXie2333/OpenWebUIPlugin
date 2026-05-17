@@ -65,8 +65,8 @@ class Pipe:
 
     class UserValves(BaseModel):
         image_size: Literal["512", "1K", "2K", "4K"] = Field(default="1K", title="图片大小 (像素)")
-        aspect_ratio: Literal["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"] = Field(
-            default="1:1", title="图片比例"
+        aspect_ratio: Literal["自动", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"] = Field(
+            default="自动", title="图片比例"
         )
 
     def __init__(self):
@@ -215,16 +215,19 @@ class Pipe:
                 raise TypeError("message content invalid")
 
         # init payload
+        image_config = {
+            "imageSize": user_valves.image_size,
+        }
+        if user_valves.aspect_ratio != "自动":
+            image_config["aspectRatio"] = user_valves.aspect_ratio
+
         payload = {
             "url": self.valves.base_url.format(model=model),
             "json": {
                 "contents": [{"parts": parts}],
                 "generationConfig": {
                     "responseModalities": self.valves.response_modalities.split(","),
-                    "imageConfig": {
-                        "aspectRatio": user_valves.aspect_ratio,
-                        "imageSize": user_valves.image_size,
-                    },
+                    "imageConfig": image_config,
                 },
             },
         }
