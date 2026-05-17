@@ -8,6 +8,7 @@ licence: MIT
 
 import base64
 import binascii
+import hashlib
 import io
 import json
 import logging
@@ -118,6 +119,7 @@ class Pipe:
             raise ValueError("user not found")
         model, payload = await self._build_payload(user=user, body=body, user_valves=__user__["valves"])
         emitted_image_call_ids = set()
+        emitted_image_hashes = set()
         # call client
         async with httpx.AsyncClient(
             base_url=self.valves.base_url,
@@ -152,16 +154,6 @@ class Pipe:
                             if is_thinking:
                                 is_thinking = False
                             yield self._format_stream_data(model=model, content=line["delta"])
-                        case "response.image_generation_call.partial_image":
-                            image_content = self._format_image_generation_result(
-                                __request__=__request__,
-                                user=user,
-                                image_data=line.get("partial_image_b64", ""),
-                                mime_type=self._get_image_tool_mime_type(payload["json"], line),
-                                image_prefix="openai-image-partial",
-                            )
-                            if image_content:
-                                yield self._format_stream_data(model=model, content=image_content)
                         case "response.output_item.done":
                             item = line.get("item") or {}
                             if item.get("type") == "image_generation_call":
@@ -171,6 +163,7 @@ class Pipe:
                                     item=item,
                                     payload=payload["json"],
                                     emitted_image_call_ids=emitted_image_call_ids,
+                                    emitted_image_hashes=emitted_image_hashes,
                                 )
                                 if image_content:
                                     yield self._format_stream_data(model=model, content=image_content)
@@ -181,6 +174,7 @@ class Pipe:
                                 response=line.get("response") or {},
                                 payload=payload["json"],
                                 emitted_image_call_ids=emitted_image_call_ids,
+                                emitted_image_hashes=emitted_image_hashes,
                             ):
                                 yield self._format_stream_data(model=model, content=image_content)
                             yield self._format_stream_data(
@@ -382,6 +376,7 @@ class Pipe:
         response: dict,
         payload: dict,
         emitted_image_call_ids: set,
+        emitted_image_hashes: set,
     ):
         for item in response.get("output", []):
             if item.get("type") != "image_generation_call":
@@ -392,6 +387,7 @@ class Pipe:
                 item=item,
                 payload=payload,
                 emitted_image_call_ids=emitted_image_call_ids,
+                emitted_image_hashes=emitted_image_hashes,
             )
             if image_content:
                 yield image_content
@@ -403,6 +399,7 @@ class Pipe:
         item: dict,
         payload: dict,
         emitted_image_call_ids: set,
+        emitted_image_hashes: set,
     ) -> str:
         image_call_id = item.get("id")
         if image_call_id and image_call_id in emitted_image_call_ids:
@@ -414,6 +411,7 @@ class Pipe:
             image_data=item.get("result", ""),
             mime_type=self._get_image_tool_mime_type(payload, item),
             image_prefix="openai-image",
+            emitted_image_hashes=emitted_image_hashes,
         )
         if image_content and image_call_id:
             emitted_image_call_ids.add(image_call_id)
@@ -426,15 +424,20 @@ class Pipe:
         image_data: str,
         mime_type: str,
         image_prefix: str,
+        emitted_image_hashes: set,
     ) -> str:
         if not image_data:
+            return ""
+        image_bytes = self._decode_base64_image(image_data)
+        image_hash = hashlib.sha256(image_bytes).hexdigest()
+        if image_hash in emitted_image_hashes:
             return ""
 
         file_item = upload_file(
             request=__request__,
             background_tasks=BackgroundTasks(),
             file=UploadFile(
-                file=io.BytesIO(self._decode_base64_image(image_data)),
+                file=io.BytesIO(image_bytes),
                 filename=f"generated-image-{uuid.uuid4().hex}{self._get_image_extension(mime_type)}",
                 headers=Headers({"content-type": mime_type}),
             ),
@@ -442,6 +445,7 @@ class Pipe:
             user=user,
             metadata={"mime_type": mime_type},
         )
+        emitted_image_hashes.add(image_hash)
         image_url = __request__.app.url_path_for("get_file_content_by_id", id=file_item.id)
         return f"![{image_prefix}-{file_item.id}]({image_url})"
 
